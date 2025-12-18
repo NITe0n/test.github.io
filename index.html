@@ -21,11 +21,10 @@
             overscroll-behavior: none; 
             font-family: -apple-system, system-ui, sans-serif;
             background-color: #f1f5f9;
-            touch-action: none;
+            touch-action: none; /* Критично для работы Pointer Events */
         }
         .app-container { height: var(--app-height); display: flex; flex-direction: column; }
         
-        /* Нижняя панель ввода */
         .quick-edit-bar {
             position: fixed;
             bottom: env(safe-area-inset-bottom, 20px);
@@ -33,9 +32,9 @@
             right: 15px;
             background: rgba(255, 255, 255, 0.98);
             backdrop-filter: blur(10px);
-            border-radius: 18px;
-            padding: 10px 14px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+            border-radius: 20px;
+            padding: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
             z-index: 1000;
             display: flex;
             align-items: center;
@@ -44,11 +43,11 @@
             animation: slideUp 0.2s ease-out;
         }
 
-        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+        @keyframes slideUp { from { transform: translateY(100px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
-        .map-viewport { touch-action: none; flex: 1; position: relative; overflow: hidden; }
-        input { font-size: 16px !important; } /* Фикс зума в Safari */
-        .map-pin { touch-action: none; pointer-events: auto; }
+        .map-viewport { touch-action: none; flex: 1; position: relative; overflow: hidden; background: #e2e8f0; }
+        input { font-size: 16px !important; }
+        .map-pin { pointer-events: auto; }
     </style>
 </head>
 <body>
@@ -78,36 +77,34 @@
             const moveDistance = useRef(0);
             const multiTouchDist = useRef(0);
 
-            // --- ОБЪЕДИНЕННАЯ ЛОГИКА НАЖАТИЙ (Pointer Events) ---
+            // --- Логика перемещения (Pointer Events) ---
             
-            const onPointerDown = (e) => {
-                // Если нажато более 1 пальца (зум)
-                if (e.isPrimary === false) return; 
-                
+            const handlePointerDown = (e) => {
+                if (e.button !== 0 && e.pointerType === 'mouse') return; // Только левая кнопка мыши
                 isPanning.current = true;
                 lastPointerPos.current = { x: e.clientX, y: e.clientY };
                 moveDistance.current = 0;
             };
 
-            const onPointerMove = (e) => {
+            const handlePointerMove = (e) => {
                 if (!isPanning.current) return;
 
                 const dx = e.clientX - lastPointerPos.current.x;
-                const dy = e.clientY - lastPos.current?.y || 0; // fallback
+                const dy = e.clientY - lastPointerPos.current.y;
                 
-                // Считаем общее смещение для отличия клика от свайпа
-                moveDistance.current += Math.abs(dx) + Math.abs(e.clientY - lastPointerPos.current.y);
+                // Накапливаем пройденное расстояние, чтобы отличить клик от перетаскивания
+                moveDistance.current += Math.abs(dx) + Math.abs(dy);
                 
                 setOffset(prev => ({ 
                     x: prev.x + dx, 
-                    y: prev.y + (e.clientY - lastPointerPos.current.y) 
+                    y: prev.y + dy 
                 }));
                 
                 lastPointerPos.current = { x: e.clientX, y: e.clientY };
             };
 
-            const onPointerUp = (e) => {
-                // Если смещение было минимальным (меньше 10px) — это осознанный клик
+            const handlePointerUp = (e) => {
+                // Если сдвиг был меньше 10 пикселей - это клик (ставим точку)
                 if (isPanning.current && moveDistance.current < 10 && image) {
                     if (!e.target.closest('.map-pin')) {
                         addPoint(e.clientX, e.clientY);
@@ -116,9 +113,8 @@
                 isPanning.current = false;
             };
 
-            // Зум щипком (Pinch) - через нативные события touch
+            // --- Зум щипком (Pinch-to-zoom) ---
             useEffect(() => {
-                const el = document.body;
                 const onTouchMove = (e) => {
                     if (e.touches.length === 2) {
                         const dist = Math.hypot(
@@ -134,11 +130,11 @@
                 };
                 const onTouchEnd = () => { multiTouchDist.current = 0; };
                 
-                el.addEventListener('touchmove', onTouchMove, { passive: false });
-                el.addEventListener('touchend', onTouchEnd);
+                window.addEventListener('touchmove', onTouchMove, { passive: false });
+                window.addEventListener('touchend', onTouchEnd);
                 return () => {
-                    el.removeEventListener('touchmove', onTouchMove);
-                    el.removeEventListener('touchend', onTouchEnd);
+                    window.removeEventListener('touchmove', onTouchMove);
+                    window.removeEventListener('touchend', onTouchEnd);
                 };
             }, []);
 
@@ -150,36 +146,34 @@
 
                 setPoints(prev => {
                     const newId = prev.length > 0 ? Math.max(...prev.map(p => p.id)) + 1 : 1;
-                    const newPoints = [...prev, { id: newId, x, y, dbm: '' }];
+                    const newPoint = { id: newId, x, y, dbm: '' };
                     setSelectedId(newId);
-                    return newPoints;
+                    return [...prev, newPoint];
                 });
             };
 
-            // Исправленный экспорт для мобилок
             const handleExport = async () => {
                 if (points.length === 0 || isExporting) return;
                 setIsExporting(true);
                 try {
-                    // 1. Excel
+                    // Excel
                     const data = points.map(p => ({ "ID": p.id, "dBm": p.dbm || "н/д" }));
                     const ws = XLSX.utils.json_to_sheet(data);
                     const wb = XLSX.utils.book_new();
                     XLSX.utils.book_append_sheet(wb, ws, "WiFi");
                     const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-                    saveAs(new Blob([excelBuffer]), `WiFi_Report.xlsx`);
+                    saveAs(new Blob([excelBuffer]), `WiFi_Report_${Date.now()}.xlsx`);
 
-                    // 2. Фото
+                    // Фото
                     if (mapContainerRef.current) {
-                        // Сбрасываем трансформации для четкого снимка
                         const blob = await htmlToImage.toBlob(mapContainerRef.current, { 
                             pixelRatio: 2, 
                             backgroundColor: '#ffffff' 
                         });
-                        saveAs(blob, `WiFi_Map.png`);
+                        saveAs(blob, `WiFi_Map_${Date.now()}.png`);
                     }
                 } catch (err) { 
-                    alert("Ошибка экспорта. Попробуйте еще раз."); 
+                    alert("Ошибка экспорта"); 
                 } finally { 
                     setIsExporting(false); 
                 }
@@ -189,8 +183,7 @@
 
             return (
                 <div className="app-container">
-                    {/* Header */}
-                    <header className="h-16 bg-white border-b flex items-center justify-between px-4 z-[100] shrink-0">
+                    <header className="h-16 bg-white border-b flex items-center justify-between px-4 z-[100] shrink-0 shadow-sm">
                         <div className="flex items-center gap-2">
                             <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg">
                                 <Icon name="zap" size={20} />
@@ -199,33 +192,33 @@
                         </div>
                         {image && (
                             <div className="flex gap-2">
-                                <button onClick={handleExport} disabled={isExporting} className="p-2.5 bg-indigo-600 text-white rounded-xl active:scale-95 transition-all">
+                                <button onClick={handleExport} disabled={isExporting} className="p-2.5 bg-indigo-600 text-white rounded-xl active:scale-95 transition-all shadow-md">
                                     <Icon name={isExporting ? "loader" : "download"} className={isExporting ? "animate-spin" : ""} />
                                 </button>
-                                <button onClick={() => setShowFullList(true)} className="p-2.5 bg-slate-100 text-slate-600 rounded-xl">
+                                <button onClick={() => setShowFullList(true)} className="p-2.5 bg-slate-100 text-slate-600 rounded-xl active:scale-95">
                                     <Icon name="list" />
                                 </button>
                             </div>
                         )}
                     </header>
 
-                    {/* Viewport */}
                     <main 
-                        className="map-viewport bg-slate-200"
-                        onPointerDown={onPointerDown}
-                        onPointerMove={onPointerMove}
-                        onPointerUp={onPointerUp}
-                        onPointerLeave={onPointerUp}
+                        className="map-viewport"
+                        onPointerDown={handlePointerDown}
+                        onPointerMove={handlePointerMove}
+                        onPointerUp={handlePointerUp}
+                        onPointerCancel={handlePointerUp}
                         onWheel={(e) => {
                             const d = e.deltaY > 0 ? 0.9 : 1.1;
                             setScale(s => Math.min(Math.max(s * d, 0.1), 8));
                         }}
                     >
                         {!image ? (
-                            <div className="h-full flex flex-col items-center justify-center p-6 text-center">
-                                <label className="bg-white p-10 rounded-[2.5rem] shadow-xl border cursor-pointer active:scale-95 transition-transform">
-                                    <Icon name="image" size={40} className="text-indigo-400 mb-4 mx-auto" />
-                                    <span className="block font-bold text-slate-800">Загрузить план</span>
+                            <div className="h-full flex flex-col items-center justify-center p-6">
+                                <label className="bg-white p-12 rounded-[2.5rem] shadow-xl text-center border cursor-pointer active:scale-95 transition-transform">
+                                    <Icon name="image" size={48} className="text-indigo-400 mb-4 mx-auto" />
+                                    <span className="block font-bold text-slate-800 mb-1">Загрузить план</span>
+                                    <span className="text-xs text-slate-400">PNG / JPG / WEBP</span>
                                     <input type="file" className="hidden" accept="image/*" onChange={(e) => {
                                         const f = e.target.files[0];
                                         if(f) {
@@ -246,7 +239,7 @@
                                 {points.map(p => (
                                     <div 
                                         key={p.id}
-                                        onClick={(e) => { e.stopPropagation(); setSelectedId(p.id); }}
+                                        onPointerDown={(e) => { e.stopPropagation(); setSelectedId(p.id); }}
                                         className={`map-pin absolute -translate-x-1/2 -translate-y-1/2 flex items-center justify-center rounded-full border-2 shadow-lg transition-transform ${
                                             selectedId === p.id ? 'w-10 h-10 bg-indigo-600 border-white text-white z-30 scale-125' : 'w-8 h-8 bg-rose-500 border-white text-white z-20'
                                         }`}
@@ -259,7 +252,7 @@
                         )}
                     </main>
 
-                    {/* Quick Edit Bar - Компактный ввод */}
+                    {/* Quick Edit Bar */}
                     {currentPoint && !showFullList && (
                         <div className="quick-edit-bar">
                             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold shrink-0">
@@ -267,13 +260,13 @@
                             </div>
                             <input 
                                 type="number" 
-                                className="flex-1 bg-slate-100 rounded-xl px-4 py-2.5 outline-none focus:ring-2 ring-indigo-500 font-bold text-lg"
+                                className="flex-1 bg-slate-100 rounded-xl px-4 py-3 outline-none focus:ring-2 ring-indigo-500 font-bold text-lg"
                                 placeholder="dBm"
                                 value={currentPoint.dbm}
                                 autoFocus
                                 onChange={(e) => setPoints(prev => prev.map(pt => pt.id === selectedId ? {...pt, dbm: e.target.value} : pt))}
                             />
-                            <button onClick={() => setSelectedId(null)} className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
+                            <button onClick={() => setSelectedId(null)} className="p-3 bg-emerald-500 text-white rounded-xl shadow-md active:scale-95">
                                 <Icon name="check" size={24} />
                             </button>
                         </div>
@@ -281,14 +274,14 @@
 
                     {/* Полноэкранный список */}
                     {showFullList && (
-                        <div className="fixed inset-0 bg-white z-[200] flex flex-col animate-in fade-in">
+                        <div className="fixed inset-0 bg-white z-[200] flex flex-col animate-in fade-in duration-200">
                             <header className="h-16 border-b flex items-center justify-between px-6 shrink-0">
-                                <h3 className="font-bold">Все точки ({points.length})</h3>
-                                <button onClick={() => setShowFullList(false)} className="p-2 bg-slate-100 rounded-full"><Icon name="x" /></button>
+                                <h3 className="font-bold text-slate-800">Все точки ({points.length})</h3>
+                                <button onClick={() => setShowFullList(false)} className="p-2 bg-slate-100 rounded-full active:scale-95"><Icon name="x" /></button>
                             </header>
                             <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50">
                                 {points.slice().reverse().map(p => (
-                                    <div key={p.id} className="bg-white p-4 rounded-2xl flex items-center gap-4 shadow-sm">
+                                    <div key={p.id} className="bg-white p-4 rounded-2xl flex items-center gap-4 shadow-sm border border-slate-100">
                                         <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center font-bold">{p.id}</div>
                                         <input 
                                             type="number" 
@@ -297,14 +290,14 @@
                                             placeholder="dBm"
                                             onChange={(e) => setPoints(prev => prev.map(pt => pt.id === p.id ? {...pt, dbm: e.target.value} : pt))} 
                                         />
-                                        <button onClick={() => setPoints(prev => prev.filter(pt => pt.id !== p.id))} className="text-rose-400 p-2">
+                                        <button onClick={() => setPoints(prev => prev.filter(pt => pt.id !== p.id))} className="text-rose-400 p-2 active:bg-rose-50 rounded-lg">
                                             <Icon name="trash-2" size={18} />
                                         </button>
                                     </div>
                                 ))}
                             </div>
                             <div className="p-6 border-t bg-white">
-                                <button onClick={() => { if(confirm('Очистить проект?')) { setImage(null); setPoints([]); setShowFullList(false); } }} className="w-full py-4 text-xs font-bold text-rose-500 border-2 border-dashed border-rose-100 rounded-2xl uppercase tracking-widest">
+                                <button onClick={() => { if(confirm('Очистить весь проект?')) { setImage(null); setPoints([]); setShowFullList(false); } }} className="w-full py-4 text-xs font-bold text-rose-500 border-2 border-dashed border-rose-200 rounded-2xl uppercase tracking-widest active:bg-rose-50">
                                     Удалить всё
                                 </button>
                             </div>
