@@ -19,48 +19,36 @@
             height: var(--app-height); 
             overflow: hidden; 
             overscroll-behavior: none; 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: -apple-system, system-ui, sans-serif;
             background-color: #f1f5f9;
+            touch-action: none;
         }
         .app-container { height: var(--app-height); display: flex; flex-direction: column; }
         
-        /* Компактная мобильная панель ввода */
+        /* Нижняя панель ввода */
         .quick-edit-bar {
             position: fixed;
-            bottom: 20px;
-            left: 20px;
-            right: 20px;
-            background: rgba(255, 255, 255, 0.95);
+            bottom: env(safe-area-inset-bottom, 20px);
+            left: 15px;
+            right: 15px;
+            background: rgba(255, 255, 255, 0.98);
             backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 12px 16px;
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2);
-            z-index: 100;
+            border-radius: 18px;
+            padding: 10px 14px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+            z-index: 1000;
             display: flex;
             align-items: center;
             gap: 12px;
-            border: 1px solid rgba(255, 255, 255, 0.5);
-            animation: slideUp 0.3s ease-out;
+            border: 1px solid #e2e8f0;
+            animation: slideUp 0.2s ease-out;
         }
 
-        @keyframes slideUp {
-            from { transform: translateY(100px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
-        }
-
-        /* Полноэкранный список (только по запросу) */
-        .full-list-overlay {
-            position: fixed;
-            inset: 0;
-            background: white;
-            z-index: 200;
-            display: flex;
-            flex-direction: column;
-        }
+        @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
 
         .map-viewport { touch-action: none; flex: 1; position: relative; overflow: hidden; }
-        input { font-size: 16px !important; }
-        .map-pin { transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        input { font-size: 16px !important; } /* Фикс зума в Safari */
+        .map-pin { touch-action: none; pointer-events: auto; }
     </style>
 </head>
 <body>
@@ -85,51 +73,74 @@
             const [offset, setOffset] = useState({ x: 0, y: 0 });
             
             const mapContainerRef = useRef(null);
-            const isMoving = useRef(false);
-            const lastPos = useRef({ x: 0, y: 0 });
-            const initialDist = useRef(null);
-            const moveCount = useRef(0);
+            const isPanning = useRef(false);
+            const lastPointerPos = useRef({ x: 0, y: 0 });
+            const moveDistance = useRef(0);
+            const multiTouchDist = useRef(0);
 
-            // Обработка Pinch Zoom
-            const handleTouchMove = useCallback((e) => {
-                if (e.touches.length === 2) {
-                    const dist = Math.hypot(
-                        e.touches[0].pageX - e.touches[1].pageX,
-                        e.touches[0].pageY - e.touches[1].pageY
-                    );
-                    if (initialDist.current === null) {
-                        initialDist.current = dist;
-                    } else {
-                        const delta = dist / initialDist.current;
-                        setScale(s => Math.min(Math.max(s * delta, 0.3), 8));
-                        initialDist.current = dist;
+            // --- ОБЪЕДИНЕННАЯ ЛОГИКА НАЖАТИЙ (Pointer Events) ---
+            
+            const onPointerDown = (e) => {
+                // Если нажато более 1 пальца (зум)
+                if (e.isPrimary === false) return; 
+                
+                isPanning.current = true;
+                lastPointerPos.current = { x: e.clientX, y: e.clientY };
+                moveDistance.current = 0;
+            };
+
+            const onPointerMove = (e) => {
+                if (!isPanning.current) return;
+
+                const dx = e.clientX - lastPointerPos.current.x;
+                const dy = e.clientY - lastPos.current?.y || 0; // fallback
+                
+                // Считаем общее смещение для отличия клика от свайпа
+                moveDistance.current += Math.abs(dx) + Math.abs(e.clientY - lastPointerPos.current.y);
+                
+                setOffset(prev => ({ 
+                    x: prev.x + dx, 
+                    y: prev.y + (e.clientY - lastPointerPos.current.y) 
+                }));
+                
+                lastPointerPos.current = { x: e.clientX, y: e.clientY };
+            };
+
+            const onPointerUp = (e) => {
+                // Если смещение было минимальным (меньше 10px) — это осознанный клик
+                if (isPanning.current && moveDistance.current < 10 && image) {
+                    if (!e.target.closest('.map-pin')) {
+                        addPoint(e.clientX, e.clientY);
                     }
-                } else if (e.touches.length === 1 && isMoving.current) {
-                    const dx = e.touches[0].clientX - lastPos.current.x;
-                    const dy = e.touches[0].clientY - lastPos.current.y;
-                    moveCount.current += Math.abs(dx) + Math.abs(dy);
-                    setOffset(prev => ({ x: prev.x + dx, y: prev.y + dy }));
-                    lastPos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
                 }
+                isPanning.current = false;
+            };
+
+            // Зум щипком (Pinch) - через нативные события touch
+            useEffect(() => {
+                const el = document.body;
+                const onTouchMove = (e) => {
+                    if (e.touches.length === 2) {
+                        const dist = Math.hypot(
+                            e.touches[0].pageX - e.touches[1].pageX,
+                            e.touches[0].pageY - e.touches[1].pageY
+                        );
+                        if (multiTouchDist.current > 0) {
+                            const ratio = dist / multiTouchDist.current;
+                            setScale(s => Math.min(Math.max(s * ratio, 0.2), 8));
+                        }
+                        multiTouchDist.current = dist;
+                    }
+                };
+                const onTouchEnd = () => { multiTouchDist.current = 0; };
+                
+                el.addEventListener('touchmove', onTouchMove, { passive: false });
+                el.addEventListener('touchend', onTouchEnd);
+                return () => {
+                    el.removeEventListener('touchmove', onTouchMove);
+                    el.removeEventListener('touchend', onTouchEnd);
+                };
             }, []);
-
-            const handleTouchStart = (e) => {
-                if (e.touches.length === 1) {
-                    isMoving.current = true;
-                    lastPos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-                    moveCount.current = 0;
-                }
-                if (e.touches.length === 2) initialDist.current = null;
-            };
-
-            const handleTouchEnd = (e) => {
-                if (moveCount.current < 10 && e.changedTouches.length === 1 && image) {
-                    const touch = e.changedTouches[0];
-                    addPoint(touch.clientX, touch.clientY);
-                }
-                isMoving.current = false;
-                initialDist.current = null;
-            };
 
             const addPoint = (clientX, clientY) => {
                 if (!mapContainerRef.current) return;
@@ -137,45 +148,58 @@
                 const x = ((clientX - rect.left) / rect.width) * 100;
                 const y = ((clientY - rect.top) / rect.height) * 100;
 
-                const newId = points.length > 0 ? Math.max(...points.map(p => p.id)) + 1 : 1;
-                setPoints([...points, { id: newId, x, y, dbm: '' }]);
-                setSelectedId(newId);
+                setPoints(prev => {
+                    const newId = prev.length > 0 ? Math.max(...prev.map(p => p.id)) + 1 : 1;
+                    const newPoints = [...prev, { id: newId, x, y, dbm: '' }];
+                    setSelectedId(newId);
+                    return newPoints;
+                });
             };
 
+            // Исправленный экспорт для мобилок
             const handleExport = async () => {
                 if (points.length === 0 || isExporting) return;
                 setIsExporting(true);
                 try {
-                    const data = points.map(p => ({ "№": p.id, "dBm": p.dbm || "н/д" }));
+                    // 1. Excel
+                    const data = points.map(p => ({ "ID": p.id, "dBm": p.dbm || "н/д" }));
                     const ws = XLSX.utils.json_to_sheet(data);
                     const wb = XLSX.utils.book_new();
                     XLSX.utils.book_append_sheet(wb, ws, "WiFi");
                     const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-                    saveAs(new Blob([excelBuffer]), `Report_${Date.now()}.xlsx`);
+                    saveAs(new Blob([excelBuffer]), `WiFi_Report.xlsx`);
 
+                    // 2. Фото
                     if (mapContainerRef.current) {
-                        const blob = await htmlToImage.toBlob(mapContainerRef.current, { pixelRatio: 2, backgroundColor: '#ffffff' });
-                        saveAs(blob, `Map_${Date.now()}.png`);
+                        // Сбрасываем трансформации для четкого снимка
+                        const blob = await htmlToImage.toBlob(mapContainerRef.current, { 
+                            pixelRatio: 2, 
+                            backgroundColor: '#ffffff' 
+                        });
+                        saveAs(blob, `WiFi_Map.png`);
                     }
-                } catch (err) { alert("Ошибка сохранения"); }
-                finally { setIsExporting(false); }
+                } catch (err) { 
+                    alert("Ошибка экспорта. Попробуйте еще раз."); 
+                } finally { 
+                    setIsExporting(false); 
+                }
             };
 
-            const selectedPoint = points.find(p => p.id === selectedId);
+            const currentPoint = points.find(p => p.id === selectedId);
 
             return (
                 <div className="app-container">
                     {/* Header */}
-                    <header className="h-16 bg-white border-b flex items-center justify-between px-4 z-[150] shrink-0">
+                    <header className="h-16 bg-white border-b flex items-center justify-between px-4 z-[100] shrink-0">
                         <div className="flex items-center gap-2">
                             <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg">
                                 <Icon name="zap" size={20} />
                             </div>
-                            <span className="font-bold text-slate-800 text-sm sm:text-base">WiFi Mapper</span>
+                            <span className="font-bold text-slate-800 text-sm">WiFi Mapper</span>
                         </div>
                         {image && (
                             <div className="flex gap-2">
-                                <button onClick={handleExport} disabled={isExporting} className="p-2.5 bg-indigo-600 text-white rounded-xl shadow-md active:scale-95">
+                                <button onClick={handleExport} disabled={isExporting} className="p-2.5 bg-indigo-600 text-white rounded-xl active:scale-95 transition-all">
                                     <Icon name={isExporting ? "loader" : "download"} className={isExporting ? "animate-spin" : ""} />
                                 </button>
                                 <button onClick={() => setShowFullList(true)} className="p-2.5 bg-slate-100 text-slate-600 rounded-xl">
@@ -188,102 +212,99 @@
                     {/* Viewport */}
                     <main 
                         className="map-viewport bg-slate-200"
-                        onMouseDown={(e) => { isMoving.current = true; lastPos.current = { x: e.clientX, y: e.clientY }; moveCount.current = 0; }}
-                        onMouseMove={(e) => { if(!isMoving.current) return; const dx = e.clientX - lastPos.current.x; const dy = e.clientY - lastPos.current.y; moveCount.current += Math.abs(dx) + Math.abs(dy); setOffset(prev => ({ x: prev.x + dx, y: prev.y + dy })); lastPos.current = { x: e.clientX, y: e.clientY }; }}
-                        onMouseUp={(e) => { if(moveCount.current < 5 && image) addPoint(e.clientX, e.clientY); isMoving.current = false; }}
-                        onTouchStart={handleTouchStart}
-                        onTouchMove={handleTouchMove}
-                        onTouchEnd={handleTouchEnd}
-                        onWheel={(e) => { e.preventDefault(); const d = e.deltaY > 0 ? 0.9 : 1.1; setScale(s => Math.min(Math.max(s * d, 0.2), 8)); }}
+                        onPointerDown={onPointerDown}
+                        onPointerMove={onPointerMove}
+                        onPointerUp={onPointerUp}
+                        onPointerLeave={onPointerUp}
+                        onWheel={(e) => {
+                            const d = e.deltaY > 0 ? 0.9 : 1.1;
+                            setScale(s => Math.min(Math.max(s * d, 0.1), 8));
+                        }}
                     >
                         {!image ? (
-                            <div className="h-full flex flex-col items-center justify-center p-6">
-                                <label className="bg-white p-8 rounded-[2.5rem] shadow-xl text-center border cursor-pointer active:scale-95 transition-transform">
-                                    <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center mx-auto mb-4 text-indigo-500">
-                                        <Icon name="image" size={32} />
-                                    </div>
-                                    <span className="block font-bold text-slate-700 mb-1">Загрузить план</span>
-                                    <span className="text-xs text-slate-400">PNG или JPG</span>
-                                    <input type="file" className="hidden" accept="image/*" onChange={(e) => { const f = e.target.files[0]; if(f) { const r = new FileReader(); r.onload = (ev) => setImage(ev.target.result); r.readAsDataURL(f); } }} />
+                            <div className="h-full flex flex-col items-center justify-center p-6 text-center">
+                                <label className="bg-white p-10 rounded-[2.5rem] shadow-xl border cursor-pointer active:scale-95 transition-transform">
+                                    <Icon name="image" size={40} className="text-indigo-400 mb-4 mx-auto" />
+                                    <span className="block font-bold text-slate-800">Загрузить план</span>
+                                    <input type="file" className="hidden" accept="image/*" onChange={(e) => {
+                                        const f = e.target.files[0];
+                                        if(f) {
+                                            const r = new FileReader();
+                                            r.onload = (ev) => setImage(ev.target.result);
+                                            r.readAsDataURL(f);
+                                        }
+                                    }} />
                                 </label>
                             </div>
                         ) : (
                             <div 
                                 ref={mapContainerRef}
-                                className="absolute origin-top-left p-20 bg-white"
+                                className="absolute origin-top-left p-10 bg-white"
                                 style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
                             >
-                                <img src={image} className="block max-w-none h-[65vh] w-auto shadow-sm" draggable={false} />
+                                <img src={image} className="block max-w-none h-[70vh] w-auto" draggable={false} />
                                 {points.map(p => (
                                     <div 
                                         key={p.id}
                                         onClick={(e) => { e.stopPropagation(); setSelectedId(p.id); }}
-                                        className={`map-pin absolute -translate-x-1/2 -translate-y-1/2 flex items-center justify-center rounded-full border-2 shadow-lg transition-all ${
-                                            selectedId === p.id ? 'w-10 h-10 bg-indigo-600 border-white text-white z-30 scale-125 shadow-indigo-200' : 'w-8 h-8 bg-rose-500 border-white text-white z-20'
+                                        className={`map-pin absolute -translate-x-1/2 -translate-y-1/2 flex items-center justify-center rounded-full border-2 shadow-lg transition-transform ${
+                                            selectedId === p.id ? 'w-10 h-10 bg-indigo-600 border-white text-white z-30 scale-125' : 'w-8 h-8 bg-rose-500 border-white text-white z-20'
                                         }`}
                                         style={{ left: `${p.x}%`, top: `${p.y}%` }}
                                     >
                                         <span className="text-[10px] font-bold">{p.id}</span>
-                                        {p.dbm && <div className="absolute top-full mt-1 bg-slate-800 text-white text-[9px] px-1.5 py-0.5 rounded font-bold shadow-sm">{p.dbm}</div>}
                                     </div>
                                 ))}
                             </div>
                         )}
                     </main>
 
-                    {/* Мобильная компактная панель ввода (Quick Edit) */}
-                    {selectedPoint && !showFullList && (
+                    {/* Quick Edit Bar - Компактный ввод */}
+                    {currentPoint && !showFullList && (
                         <div className="quick-edit-bar">
                             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold shrink-0">
-                                {selectedPoint.id}
+                                {currentPoint.id}
                             </div>
-                            <div className="flex-1 flex items-center gap-2">
-                                <input 
-                                    type="number" 
-                                    className="w-full bg-slate-100 rounded-lg px-3 py-2 outline-none focus:ring-2 ring-indigo-500 font-bold text-lg"
-                                    placeholder="Введите dBm..."
-                                    value={selectedPoint.dbm}
-                                    autoFocus
-                                    onChange={(e) => setPoints(points.map(pt => pt.id === selectedId ? {...pt, dbm: e.target.value} : pt))}
-                                />
-                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">dBm</span>
-                            </div>
-                            <button onClick={() => setSelectedId(null)} className="p-2 text-slate-400">
-                                <Icon name="check" className="text-emerald-500" />
+                            <input 
+                                type="number" 
+                                className="flex-1 bg-slate-100 rounded-xl px-4 py-2.5 outline-none focus:ring-2 ring-indigo-500 font-bold text-lg"
+                                placeholder="dBm"
+                                value={currentPoint.dbm}
+                                autoFocus
+                                onChange={(e) => setPoints(prev => prev.map(pt => pt.id === selectedId ? {...pt, dbm: e.target.value} : pt))}
+                            />
+                            <button onClick={() => setSelectedId(null)} className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
+                                <Icon name="check" size={24} />
                             </button>
                         </div>
                     )}
 
-                    {/* Полноэкранный список точек */}
+                    {/* Полноэкранный список */}
                     {showFullList && (
-                        <div className="full-list-overlay animate-in fade-in duration-200">
+                        <div className="fixed inset-0 bg-white z-[200] flex flex-col animate-in fade-in">
                             <header className="h-16 border-b flex items-center justify-between px-6 shrink-0">
-                                <h3 className="font-bold text-slate-800">Все замеры ({points.length})</h3>
-                                <button onClick={() => setShowFullList(false)} className="p-2 bg-slate-100 rounded-full">
-                                    <Icon name="x" />
-                                </button>
+                                <h3 className="font-bold">Все точки ({points.length})</h3>
+                                <button onClick={() => setShowFullList(false)} className="p-2 bg-slate-100 rounded-full"><Icon name="x" /></button>
                             </header>
                             <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50">
-                                {points.length === 0 ? (
-                                    <p className="text-center text-slate-400 mt-20">Точек еще нет</p>
-                                ) : (
-                                    [...points].reverse().map(p => (
-                                        <div key={p.id} className="bg-white p-4 rounded-2xl flex items-center gap-4 shadow-sm">
-                                            <div className="w-10 h-10 bg-slate-100 rounded-xl flex items-center justify-center font-bold text-slate-500">{p.id}</div>
-                                            <input 
-                                                type="number" 
-                                                className="flex-1 bg-transparent font-bold text-lg outline-none" 
-                                                value={p.dbm} 
-                                                placeholder="dBm"
-                                                onChange={(e) => setPoints(points.map(pt => pt.id === p.id ? {...pt, dbm: e.target.value} : pt))} 
-                                            />
-                                            <button onClick={() => setPoints(points.filter(pt => pt.id !== p.id))} className="text-rose-400 p-2"><Icon name="trash-2" size={18} /></button>
-                                        </div>
-                                    ))
-                                )}
+                                {points.slice().reverse().map(p => (
+                                    <div key={p.id} className="bg-white p-4 rounded-2xl flex items-center gap-4 shadow-sm">
+                                        <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center font-bold">{p.id}</div>
+                                        <input 
+                                            type="number" 
+                                            className="flex-1 bg-transparent font-bold text-lg outline-none" 
+                                            value={p.dbm} 
+                                            placeholder="dBm"
+                                            onChange={(e) => setPoints(prev => prev.map(pt => pt.id === p.id ? {...pt, dbm: e.target.value} : pt))} 
+                                        />
+                                        <button onClick={() => setPoints(prev => prev.filter(pt => pt.id !== p.id))} className="text-rose-400 p-2">
+                                            <Icon name="trash-2" size={18} />
+                                        </button>
+                                    </div>
+                                ))}
                             </div>
                             <div className="p-6 border-t bg-white">
-                                <button onClick={() => { if(confirm('Очистить проект?')) { setImage(null); setPoints([]); setShowFullList(false); } }} className="w-full py-4 text-[10px] font-black text-rose-500 border-2 border-dashed border-rose-100 rounded-2xl uppercase tracking-widest">
+                                <button onClick={() => { if(confirm('Очистить проект?')) { setImage(null); setPoints([]); setShowFullList(false); } }} className="w-full py-4 text-xs font-bold text-rose-500 border-2 border-dashed border-rose-100 rounded-2xl uppercase tracking-widest">
                                     Удалить всё
                                 </button>
                             </div>
